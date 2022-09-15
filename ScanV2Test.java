@@ -1,7 +1,6 @@
 package com.reltio.db.layer;
 
 import com.google.common.collect.ImmutableMap;
-import com.reltio.common.Pair;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
@@ -17,7 +16,7 @@ import java.net.URISyntaxException;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.DoubleAdder;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -26,7 +25,7 @@ import static java.lang.Boolean.TRUE;
 import static java.lang.System.out;
 
 public class ScanV2Test {
-    static final String TABLE = "ScanV2Test";
+    static final String TABLE = "random2";
     final DynamoDbAsyncClient client;
     final Random rnd = new Random();
     final List<Pair<String, Long>> data = new ArrayList<>();
@@ -46,7 +45,7 @@ public class ScanV2Test {
             test.create();
             test.generate();
 //            dump();
-            int nrequests = 200;
+            int nrequests = 100000;
             int limit = 100;
             {
                 Statistics stat = new Statistics("scan sequential");
@@ -70,28 +69,31 @@ public class ScanV2Test {
             }
             {
                 Statistics stat = new Statistics("scan parallel");
-                List<CompletableFuture<ScanResponse>> requests = new ArrayList<>(nrequests);
-                for (int i = 0; i < nrequests; i++) {
-                    long st = System.currentTimeMillis();
-                    requests.add(test.client.scan(ScanRequest.builder()
-                            .tableName(TABLE)
-                            .limit(limit)
-                            .filterExpression("#nid > :n")
-                            .expressionAttributeNames(Collections.singletonMap("#nid", "nid"))
-                            .expressionAttributeValues(Collections.singletonMap(":n", AttributeValue.fromN(Long.toString(test.rnd.nextInt(8000)))))
-                            .consistentRead(FALSE)
-                            .returnConsumedCapacity(ReturnConsumedCapacity.TOTAL)
-                            .build())
-                        .thenApply(
-                            rs -> {
-                                stat.add(System.currentTimeMillis() - st);
-                                stat.addConsumed(rs.consumedCapacity());
-                                if (rs.count() == 0 || rs.count() > limit) throw new RuntimeException("wrong number of rows returned " + rs.count());
-                                return rs;
-                            })
-                    );
+                for (int b = 0; b < 100; b++) {
+                    List<CompletableFuture<ScanResponse>> requests = new ArrayList<>(nrequests / 100);
+                    for (int i = 0; i < nrequests / 100; i++) {
+                        long st = System.currentTimeMillis();
+                        requests.add(test.client.scan(ScanRequest.builder()
+                                .tableName(TABLE)
+                                .limit(limit)
+                                .filterExpression("#nid > :n")
+                                .expressionAttributeNames(Collections.singletonMap("#nid", "nid"))
+                                .expressionAttributeValues(Collections.singletonMap(":n", AttributeValue.fromN(Long.toString(test.rnd.nextInt(8000)))))
+                                .consistentRead(FALSE)
+                                .returnConsumedCapacity(ReturnConsumedCapacity.TOTAL)
+                                .build())
+                            .thenApply(
+                                rs -> {
+                                    stat.add(System.currentTimeMillis() - st);
+                                    stat.addConsumed(rs.consumedCapacity());
+                                    if (rs.count() == 0 || rs.count() > limit)
+                                        throw new RuntimeException("wrong number of rows returned " + rs.count());
+                                    return rs;
+                                })
+                        );
+                    }
+                    CompletableFuture.allOf(requests.toArray(new CompletableFuture[1])).join();
                 }
-                CompletableFuture.allOf(requests.toArray(new CompletableFuture[1])).join();
                 stat.print(nrequests);
             }
             {
@@ -116,30 +118,32 @@ public class ScanV2Test {
             }
             {
                 Statistics stat = new Statistics("getitem parallel");
-                List<CompletableFuture<GetItemResponse>> requests = new ArrayList<>(nrequests);
-                for (int i = 0; i < nrequests; i++) {
-                    Pair<String, Long> d = test.data.get(test.rnd.nextInt(test.data.size()));
-                    long st = System.currentTimeMillis();
-                    requests.add(
-                        test.client.getItem(GetItemRequest.builder()
-                            .tableName(TABLE)
-                            .key(ImmutableMap.of("id", AttributeValue.fromS(d.a),
-                                                 "nid", AttributeValue.fromN(d.b.toString())))
-                            .attributesToGet("id", "nid", "data")
-                            .consistentRead(FALSE)
-                            .returnConsumedCapacity(ReturnConsumedCapacity.TOTAL)
-                            .build())
-                        .thenApply(rs -> {
-                            stat.add(System.currentTimeMillis() - st);
-                            stat.addConsumed(rs.consumedCapacity());
-                            if (!rs.item().get("id").s().equals(d.a) ||
-                                !rs.item().get("nid").n().equals(d.b.toString()))
-                                throw new RuntimeException("invalid getItem response " + rs);
-                            return rs;
-                        })
-                    );
+                for (int b = 0; b < 100; b++) {
+                    List<CompletableFuture<GetItemResponse>> requests = new ArrayList<>(nrequests / 100);
+                    for (int i = 0; i < nrequests / 100; i++) {
+                        Pair<String, Long> d = test.data.get(test.rnd.nextInt(test.data.size()));
+                        long st = System.currentTimeMillis();
+                        requests.add(
+                            test.client.getItem(GetItemRequest.builder()
+                                    .tableName(TABLE)
+                                    .key(ImmutableMap.of("id", AttributeValue.fromS(d.a),
+                                        "nid", AttributeValue.fromN(d.b.toString())))
+                                    .attributesToGet("id", "nid", "data")
+                                    .consistentRead(FALSE)
+                                    .returnConsumedCapacity(ReturnConsumedCapacity.TOTAL)
+                                    .build())
+                                .thenApply(rs -> {
+                                    stat.add(System.currentTimeMillis() - st);
+                                    stat.addConsumed(rs.consumedCapacity());
+                                    if (!rs.item().get("id").s().equals(d.a) ||
+                                        !rs.item().get("nid").n().equals(d.b.toString()))
+                                        throw new RuntimeException("invalid getItem response " + rs);
+                                    return rs;
+                                })
+                        );
+                    }
+                    CompletableFuture.allOf(requests.toArray(new CompletableFuture[1])).join();
                 }
-                CompletableFuture.allOf(requests.toArray(new CompletableFuture[1])).join();
                 stat.print(nrequests);
             }
         } catch (Exception e) {
@@ -169,12 +173,15 @@ public class ScanV2Test {
         }
         return builder
             .httpClientBuilder(NettyNioAsyncHttpClient.builder()
-                .maxConcurrency(200)
-                .maxPendingConnectionAcquires(10_000)
+                .maxConcurrency(1000)
+                .maxPendingConnectionAcquires(100_000)
                 .connectionMaxIdleTime(Duration.ofSeconds(60))
                 .connectionTimeout(Duration.ofSeconds(30))
                 .connectionAcquisitionTimeout(Duration.ofSeconds(30))
-                .readTimeout(Duration.ofSeconds(30)))
+                .readTimeout(Duration.ofSeconds(30))
+                .tcpKeepAlive(true)
+                .connectionAcquisitionTimeout(Duration.ofSeconds(30))
+            )
             .asyncConfiguration(b -> b.advancedOption(SdkAdvancedAsyncClientOption.FUTURE_COMPLETION_EXECUTOR, Runnable::run))
             .build();
     }
@@ -190,7 +197,7 @@ public class ScanV2Test {
                     KeySchemaElement.builder().attributeName("id").keyType(KeyType.HASH).build(),
                     KeySchemaElement.builder().attributeName("nid").keyType(KeyType.RANGE).build())
                 .provisionedThroughput(ProvisionedThroughput.builder()
-                    .readCapacityUnits(1000L).writeCapacityUnits(1000L).build())
+                    .readCapacityUnits(5000L).writeCapacityUnits(500L).build())
                 .build()).join();
             TableStatus status = TableStatus.CREATING;
             do {
@@ -288,8 +295,7 @@ public class ScanV2Test {
     static class Statistics {
         final String title;
         final ArrayList<Long> points = new ArrayList<>(10000);
-        final AtomicInteger rcu = new AtomicInteger(0);
-        final AtomicInteger wcu = new AtomicInteger(0);
+        final DoubleAdder rcu = new DoubleAdder();
         final long started;
 
         public Statistics(String t) {
@@ -300,9 +306,8 @@ public class ScanV2Test {
         synchronized void add(long point) { points.add(point); }
 
         void addConsumed(ConsumedCapacity consumed) {
-            if (consumed != null && consumed.readCapacityUnits() != null) {
-                rcu.addAndGet(consumed.readCapacityUnits().intValue());
-                wcu.addAndGet(consumed.writeCapacityUnits().intValue());
+            if (consumed != null && consumed.capacityUnits() != null) {
+                rcu.add(consumed.capacityUnits());
             }
         }
 
@@ -331,10 +336,17 @@ public class ScanV2Test {
 
         void print(int nrequests) {
             out.println(title + " " + nrequests + " total: " + (System.currentTimeMillis() - started) + "ms " +
-                "consumed " + rcu.get() + " rcu/" + wcu.get() + " wcu");
+                "consumed " + rcu + " rcu");
             out.println(title + " percentiles: " + percentiles()
                 .entrySet().stream().map(e -> e.getKey() + " " + e.getValue() + "ms")
                 .collect(Collectors.joining(", ")));
         }
+    }
+
+    static class Pair<A, B> {
+        final A a;
+        final B b;
+
+        public Pair(A a, B b) { this.a = a; this.b = b; }
     }
 }
