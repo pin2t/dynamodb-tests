@@ -8,13 +8,11 @@ import com.amazonaws.services.dynamodbv2.AmazonDynamoDB;
 import com.amazonaws.services.dynamodbv2.AmazonDynamoDBClientBuilder;
 import com.amazonaws.services.dynamodbv2.model.*;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.util.concurrent.AtomicDouble;
-import com.reltio.common.Pair;
 
 import java.net.URISyntaxException;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.DoubleAdder;
 import java.util.stream.Collectors;
 
 import static java.lang.Boolean.FALSE;
@@ -22,7 +20,7 @@ import static java.lang.Boolean.TRUE;
 import static java.lang.System.out;
 
 public class ScanV1Test {
-    static final String TABLE = "ScanV1Test";
+    static final String TABLE = "random1";
     final AmazonDynamoDB client;
     final Random rnd = new Random();
     final List<Pair<String, Long>> data = new ArrayList<>();
@@ -42,7 +40,7 @@ public class ScanV1Test {
             test.create();
             test.generate();
 //        dump();
-            int nrequests = 200;
+            int nrequests = 100000;
             int limit = 100;
             {
                 Statistics stat = new Statistics("scan sequential");
@@ -54,6 +52,7 @@ public class ScanV1Test {
                             .withFilterExpression("#nid > :n")
                             .withExpressionAttributeNames(Collections.singletonMap("#nid", "nid"))
                             .withExpressionAttributeValues(Collections.singletonMap(":n", new AttributeValue().withN(Long.toString(test.rnd.nextInt(8000)))))
+                            .withReturnConsumedCapacity(ReturnConsumedCapacity.TOTAL)
                         );
                         if (rs.getCount() == 0 || rs.getCount() > limit) throw new RuntimeException("invalid number of rows returned " + rs.getCount());
                     });
@@ -71,6 +70,7 @@ public class ScanV1Test {
                             .withFilterExpression("#nid > :n")
                             .withExpressionAttributeNames(Collections.singletonMap("#nid", "nid"))
                             .withExpressionAttributeValues(Collections.singletonMap(":n", new AttributeValue().withN(Long.toString(test.rnd.nextInt(8000)))))
+                            .withReturnConsumedCapacity(ReturnConsumedCapacity.TOTAL)
                         );
                         if (rs.getCount() == 0 || rs.getCount() > limit) throw new RuntimeException("invalid number of rows returned " + rs.getCount());
                     }));
@@ -90,6 +90,7 @@ public class ScanV1Test {
                             .withKey(ImmutableMap.of("id", new AttributeValue(d.a),
                                                      "nid", new AttributeValue().withN(d.b.toString())))
                             .withAttributesToGet("id", "nid", "data")
+                            .withReturnConsumedCapacity(ReturnConsumedCapacity.TOTAL)
                             .withConsistentRead(FALSE));
                         if (!rs.getItem().get("id").getS().equals(d.a) ||
                             !rs.getItem().get("nid").getN().equals(d.b.toString()))
@@ -110,6 +111,7 @@ public class ScanV1Test {
                             .withKey(ImmutableMap.of("id", new AttributeValue(d.a),
                                                     "nid", new AttributeValue().withN(d.b.toString())))
                             .withAttributesToGet("id", "nid", "data")
+                            .withReturnConsumedCapacity(ReturnConsumedCapacity.TOTAL)
                             .withConsistentRead(FALSE));
                         stat.add(System.currentTimeMillis() - st);
                         if (!rs.getItem().get("id").getS().equals(d.a) ||
@@ -172,7 +174,7 @@ public class ScanV1Test {
                 .withKeySchema(
                     new KeySchemaElement().withAttributeName("id").withKeyType(KeyType.HASH),
                     new KeySchemaElement().withAttributeName("nid").withKeyType(KeyType.RANGE))
-                .withProvisionedThroughput(new ProvisionedThroughput().withReadCapacityUnits(1000L).withWriteCapacityUnits(1000L)));
+                .withProvisionedThroughput(new ProvisionedThroughput().withReadCapacityUnits(10000L).withWriteCapacityUnits(500L)));
             TableStatus status = TableStatus.CREATING;
             do {
                 try {
@@ -259,8 +261,7 @@ public class ScanV1Test {
         final ArrayList<Long> points = new ArrayList<>(10000);
         final long started;
         final String title;
-        final AtomicDouble rcu = new AtomicDouble(0);
-        final AtomicDouble wcu = new AtomicDouble(0);
+        final DoubleAdder rcu = new DoubleAdder();
 
         public Statistics(String title) {
             this.started = System.currentTimeMillis();
@@ -269,9 +270,8 @@ public class ScanV1Test {
 
         synchronized void add(long point) { points.add(point); }
         synchronized void add(ConsumedCapacity consumed) {
-            if (consumed != null && consumed.getReadCapacityUnits() != null) {
-                rcu.addAndGet(consumed.getReadCapacityUnits());
-                wcu.addAndGet(consumed.getWriteCapacityUnits());
+            if (consumed != null && consumed.getCapacityUnits() != null) {
+                rcu.add(consumed.getCapacityUnits());
             }
         }
 
@@ -300,10 +300,17 @@ public class ScanV1Test {
 
         void print(int nrequests) {
             out.println(title + " " + nrequests + " total: " + (System.currentTimeMillis() - started) + "ms" +
-                "consumed " + rcu + " rcu/" + wcu + " wcu");
+                " consumed " + rcu + " rcu");
             out.println(title + " percentiles: " + percentiles()
                 .entrySet().stream().map(e -> e.getKey() + " " + e.getValue() + "ms")
                 .collect(Collectors.joining(", ")));
         }
+    }
+
+    static class Pair<A, B> {
+        final A a;
+        final B b;
+
+        public Pair(A a, B b) { this.a = a; this.b = b; }
     }
 }
